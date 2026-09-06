@@ -19,41 +19,25 @@ enum TransactionStatus {
   FAILED
 }
 
-model User {
-  id            String        @id @default(cuid())
-  walletAddress String        @unique
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  transactions  Transaction[]
-  sessions      Session[]
-}
-
-model Session {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-}
-
+// There are no user accounts — a wallet address is the only identity. This
+// table is purely a best-effort activity log for the dashboard; buying and
+// selling both work with no database configured at all (see the onramp/
+// offramp session routes), so a write failing here never blocks a trade.
 model Transaction {
-  id                 String            @id @default(cuid())
-  userId             String
-  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type               TransactionType
-  status             TransactionStatus @default(PENDING)
-  provider           String
-  providerSessionId  String?           @unique
-  sourceAmount       Decimal
-  sourceCurrency     String
-  destinationAmount  Decimal?
+  id                  String            @id @default(cuid())
+  walletAddress       String
+  type                TransactionType
+  status              TransactionStatus @default(PENDING)
+  provider            String
+  providerSessionId   String?           @unique
+  sourceAmount        Decimal
+  sourceCurrency      String
+  destinationAmount   Decimal?
   destinationCurrency String
-  walletAddress      String
-  onChainTxSignature String?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  onChainTxSignature  String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
-  @@index([userId])
+  @@index([walletAddress])
   @@index([status])
 }

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { SESSION_COOKIE, getUserBySessionToken } from "@/lib/auth";
 import { isValidSolanaAddress } from "@/lib/solana";
 
 // Stripe Crypto Onramp is buy-only — there is no Stripe API to convert
@@ -11,12 +10,6 @@ import { isValidSolanaAddress } from "@/lib/solana";
 const OFFRAMP_API_URL = process.env.OFFRAMP_PROVIDER_API_URL ?? "https://api.kado.money";
 
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
-  const user = await getUserBySessionToken(token);
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
   const { walletAddress, sourceAmount, sourceCurrency = "sol" } = await req.json();
 
   if (!walletAddress || !isValidSolanaAddress(walletAddress)) {
@@ -31,7 +24,10 @@ export async function POST(req: NextRequest) {
   const apiKey = process.env.OFFRAMP_PROVIDER_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "Off-ramp provider is not configured" },
+      {
+        error:
+          "The off-ramp provider is not configured on this deployment. Set OFFRAMP_PROVIDER_API_KEY (and OFFRAMP_PROVIDER_API_URL if not using Kado) to enable selling.",
+      },
       { status: 503 }
     );
   }
@@ -64,19 +60,22 @@ export async function POST(req: NextRequest) {
       depositAddress: string;
     };
 
-    await prisma.transaction.create({
-      data: {
-        userId: user.id,
-        type: "SELL",
-        status: "PENDING",
-        provider: "kado",
-        providerSessionId: providerSession.sessionId,
-        sourceAmount: amount,
-        sourceCurrency,
-        destinationCurrency: "usd",
-        walletAddress,
-      },
-    });
+    // Best-effort activity log — see the onramp session route for why this
+    // never blocks the actual sell flow.
+    prisma.transaction
+      .create({
+        data: {
+          walletAddress,
+          type: "SELL",
+          status: "PENDING",
+          provider: "kado",
+          providerSessionId: providerSession.sessionId,
+          sourceAmount: amount,
+          sourceCurrency,
+          destinationCurrency: "usd",
+        },
+      })
+      .catch((err) => console.error("Failed to log sell transaction (non-blocking)", err));
 
     return NextResponse.json({
       widgetUrl: providerSession.widgetUrl,

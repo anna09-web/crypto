@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { SESSION_COOKIE, getUserBySessionToken } from "@/lib/auth";
 import { isValidSolanaAddress } from "@/lib/solana";
 
 // Stripe's Crypto Onramp API (`crypto/onramp_sessions`) is in public beta and
@@ -9,12 +8,6 @@ import { isValidSolanaAddress } from "@/lib/solana";
 const STRIPE_API_BASE = "https://api.stripe.com/v1";
 
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
-  const user = await getUserBySessionToken(token);
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  }
-
   const { walletAddress, sourceAmount, destinationCurrency = "sol" } = await req.json();
 
   if (!walletAddress || !isValidSolanaAddress(walletAddress)) {
@@ -28,7 +21,13 @@ export async function POST(req: NextRequest) {
 
   const secretKey = process.env.STRIPE_SECRET_KEY;
   if (!secretKey) {
-    return NextResponse.json({ error: "Stripe is not configured" }, { status: 503 });
+    return NextResponse.json(
+      {
+        error:
+          "Stripe is not configured on this deployment. Set STRIPE_SECRET_KEY (and NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY) in your environment variables — you'll need a Stripe account with Crypto Onramp enabled.",
+      },
+      { status: 503 }
+    );
   }
 
   try {
@@ -57,19 +56,24 @@ export async function POST(req: NextRequest) {
 
     const session = (await stripeRes.json()) as { id: string; client_secret: string };
 
-    await prisma.transaction.create({
-      data: {
-        userId: user.id,
-        type: "BUY",
-        status: "PENDING",
-        provider: "stripe",
-        providerSessionId: session.id,
-        sourceAmount: amount,
-        sourceCurrency: "usd",
-        destinationCurrency,
-        walletAddress,
-      },
-    });
+    // Best-effort activity log. There are no user accounts and no required
+    // database — if it's not configured, or the write fails for any reason,
+    // the purchase still proceeds; only the dashboard's history list is
+    // affected.
+    prisma.transaction
+      .create({
+        data: {
+          walletAddress,
+          type: "BUY",
+          status: "PENDING",
+          provider: "stripe",
+          providerSessionId: session.id,
+          sourceAmount: amount,
+          sourceCurrency: "usd",
+          destinationCurrency,
+        },
+      })
+      .catch((err) => console.error("Failed to log buy transaction (non-blocking)", err));
 
     return NextResponse.json({ clientSecret: session.client_secret });
   } catch (err) {

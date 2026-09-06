@@ -22,7 +22,7 @@ export default function DashboardPage() {
         <BalanceCard walletAddress={publicKey.toBase58()} />
       </div>
       <h2 className="mt-10 text-lg font-bold">History</h2>
-      <TransactionTable />
+      <TransactionTable walletAddress={publicKey.toBase58()} />
     </div>
   );
 }

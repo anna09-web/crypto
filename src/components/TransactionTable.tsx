@@ -15,7 +15,7 @@ type Transaction = {
   createdAt: string;
 };
 
-export function TransactionTable() {
+export function TransactionTable({ walletAddress }: { walletAddress: string }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -23,7 +23,7 @@ export function TransactionTable() {
     let cancelled = false;
 
     async function load() {
-      const res = await fetch("/api/transactions");
+      const res = await fetch(`/api/transactions?walletAddress=${walletAddress}`);
       if (res.ok && !cancelled) {
         const data = await res.json();
         setTransactions(data.transactions);
@@ -37,7 +37,7 @@ export function TransactionTable() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [walletAddress]);
 
   if (loading) {
     return <div className="mt-8 text-sm text-black/60">Loading transactions…</div>;

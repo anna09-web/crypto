@@ -1,19 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { SESSION_COOKIE, getUserBySessionToken } from "@/lib/auth";
+import { isValidSolanaAddress } from "@/lib/solana";
 
 export async function GET(req: NextRequest) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
-  const user = await getUserBySessionToken(token);
-  if (!user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  const walletAddress = req.nextUrl.searchParams.get("walletAddress");
+
+  if (!walletAddress || !isValidSolanaAddress(walletAddress)) {
+    return NextResponse.json({ error: "Invalid wallet address" }, { status: 400 });
   }
 
-  const transactions = await prisma.transaction.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: "desc" },
-    take: 50,
-  });
+  try {
+    const transactions = await prisma.transaction.findMany({
+      where: { walletAddress },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
 
-  return NextResponse.json({ transactions });
+    return NextResponse.json({ transactions });
+  } catch (err) {
+    // No database configured, or it's unreachable — history just shows as
+    // empty rather than breaking the dashboard.
+    console.error("Failed to load transactions (non-blocking)", err);
+    return NextResponse.json({ transactions: [] });
+  }
 }
