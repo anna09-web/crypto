@@ -30,9 +30,34 @@ const SafeWalletModalProvider = WalletModalProvider as unknown as ComponentType<
 // WalletConnect adapter's viem/Reown stack, which fires off network calls
 // to WalletConnect's infrastructure on every page load. Backpack and other
 // Wallet Standard wallets are still auto-detected on top of this list.
+const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
+
+// ConnectionProvider constructs a `Connection` from this string immediately
+// on render, on every page. If NEXT_PUBLIC_SOLANA_RPC_URL is set but
+// malformed (a stray quote or missing protocol from a copy-paste, say),
+// that throws synchronously and takes the entire app down. Validate it
+// up front and fall back to the public endpoint instead of crashing.
+function resolveEndpoint(): string {
+  const configured = process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
+  if (!configured) return DEFAULT_RPC_URL;
+
+  try {
+    const url = new URL(configured);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error(`unsupported protocol "${url.protocol}"`);
+    }
+    return configured;
+  } catch (err) {
+    console.error(
+      `Invalid NEXT_PUBLIC_SOLANA_RPC_URL ("${configured}"), falling back to the public RPC endpoint.`,
+      err
+    );
+    return DEFAULT_RPC_URL;
+  }
+}
+
 export const Providers: FC<{ children: ReactNode }> = ({ children }) => {
-  const endpoint =
-    process.env.NEXT_PUBLIC_SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+  const endpoint = useMemo(resolveEndpoint, []);
 
   const wallets = useMemo(() => [new PhantomWalletAdapter(), new SolflareWalletAdapter()], []);
 
