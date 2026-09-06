@@ -1,14 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { isValidSolanaAddress } from "@/lib/solana";
+import { findAccount, getOrder, placeMarketBuy, sendCrypto } from "@/lib/coinbase";
 
-// Stripe's Crypto Onramp API (`crypto/onramp_sessions`) is in public beta and
-// not yet part of the typed stripe-node SDK, so it's called directly over
-// Stripe's REST API with the secret key as a bearer token.
-const STRIPE_API_BASE = "https://api.stripe.com/v1";
+// Personal-use buy flow: places a real market order on the operator's own
+// Coinbase account (funded by whatever card/bank is linked there) and
+// sends the filled SOL straight to the requesting wallet. This is not a
+// customer-facing money-transmission product — it's automating one
+// person's own verified Coinbase account, the same way a personal trading
+// bot would.
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export async function POST(req: NextRequest) {
-  const { walletAddress, sourceAmount, destinationCurrency = "sol" } = await req.json();
+  const { walletAddress, sourceAmount } = await req.json();
 
   if (!walletAddress || !isValidSolanaAddress(walletAddress)) {
     return NextResponse.json({ error: "Invalid wallet address" }, { status: 400 });
@@ -19,65 +25,70 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid source amount" }, { status: 400 });
   }
 
-  const secretKey = process.env.STRIPE_SECRET_KEY;
-  if (!secretKey) {
+  if (!process.env.COINBASE_API_KEY_NAME || !process.env.COINBASE_API_PRIVATE_KEY) {
     return NextResponse.json(
       {
         error:
-          "Stripe is not configured on this deployment. Set STRIPE_SECRET_KEY (and NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY) in your environment variables — you'll need a Stripe account with Crypto Onramp enabled.",
+          "Coinbase is not configured on this deployment. Set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY in your environment variables.",
       },
       { status: 503 }
     );
   }
 
   try {
-    const params = new URLSearchParams({
-      "wallet_addresses[solana]": walletAddress,
-      destination_currency: destinationCurrency,
-      destination_network: "solana",
-      source_amount: String(amount),
-      source_currency: "usd",
-    });
+    let order = await placeMarketBuy(amount.toFixed(2));
 
-    const stripeRes = await fetch(`${STRIPE_API_BASE}/crypto/onramp_sessions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secretKey}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: params,
-    });
-
-    if (!stripeRes.ok) {
-      const body = await stripeRes.text();
-      console.error("Stripe onramp session error", stripeRes.status, body);
-      return NextResponse.json({ error: "Stripe rejected the onramp request" }, { status: 502 });
+    // IOC market orders resolve almost immediately, but give it a few
+    // extra checks in case Coinbase hasn't settled the fill yet.
+    for (let attempt = 0; attempt < 5 && order.status !== "FILLED"; attempt++) {
+      await sleep(1000);
+      order = await getOrder(order.order_id);
     }
 
-    const session = (await stripeRes.json()) as { id: string; client_secret: string };
+    if (order.status !== "FILLED" || !order.filled_size) {
+      return NextResponse.json(
+        {
+          error: `Order did not fill in time (status: ${order.status ?? "unknown"}). Check your Coinbase account directly — it may still complete.`,
+          orderId: order.order_id,
+        },
+        { status: 502 }
+      );
+    }
 
-    // Best-effort activity log. There are no user accounts and no required
-    // database — if it's not configured, or the write fails for any reason,
-    // the purchase still proceeds; only the dashboard's history list is
-    // affected.
+    const solAccount = await findAccount("SOL");
+    const send = await sendCrypto({
+      accountId: solAccount.uuid,
+      toAddress: walletAddress,
+      amount: order.filled_size,
+      currency: "SOL",
+    });
+
     prisma.transaction
       .create({
         data: {
           walletAddress,
           type: "BUY",
-          status: "PENDING",
-          provider: "stripe",
-          providerSessionId: session.id,
+          status: send.status === "completed" ? "COMPLETED" : "PROCESSING",
+          provider: "coinbase",
+          providerSessionId: order.order_id,
           sourceAmount: amount,
           sourceCurrency: "usd",
-          destinationCurrency,
+          destinationAmount: order.filled_size,
+          destinationCurrency: "sol",
         },
       })
       .catch((err) => console.error("Failed to log buy transaction (non-blocking)", err));
 
-    return NextResponse.json({ clientSecret: session.client_secret });
+    return NextResponse.json({
+      status: "sent",
+      solAmount: order.filled_size,
+      averagePrice: order.average_filled_price,
+      sendId: send.id,
+      sendStatus: send.status,
+    });
   } catch (err) {
-    console.error("Failed to create Stripe onramp session", err);
-    return NextResponse.json({ error: "Failed to create onramp session" }, { status: 502 });
+    console.error("Coinbase buy flow failed", err);
+    const message = err instanceof Error ? err.message : "Failed to complete the purchase";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }
