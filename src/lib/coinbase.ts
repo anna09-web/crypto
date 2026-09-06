@@ -7,41 +7,69 @@ import jwt from "jsonwebtoken";
 // https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/auth
 const API_HOST = "api.coinbase.com";
 
+// Normalizes the handful of ways a multi-line PEM tends to arrive in a
+// pasted env var: surrounding quotes copied along with the value, an
+// escaped "\n" sequence (typing it as literal backslash-n), or Vercel's
+// env var textarea preserving real newlines directly — all are accepted.
+function normalizePrivateKey(raw: string): string {
+  let key = raw.trim();
+  if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
+    key = key.slice(1, -1).trim();
+  }
+  key = key.replace(/\\n/g, "\n");
+  if (!key.endsWith("\n")) key += "\n";
+  return key;
+}
+
 function getCredentials() {
   const keyName = process.env.COINBASE_API_KEY_NAME;
-  const privateKey = process.env.COINBASE_API_PRIVATE_KEY;
-  if (!keyName || !privateKey) {
+  const rawPrivateKey = process.env.COINBASE_API_PRIVATE_KEY;
+  if (!keyName || !rawPrivateKey) {
     throw new Error(
       "Coinbase is not configured — set COINBASE_API_KEY_NAME and COINBASE_API_PRIVATE_KEY."
     );
   }
-  // Vercel env vars can't hold literal newlines cleanly; the PEM is stored
-  // with escaped "\n" sequences and unescaped here.
-  return { keyName, privateKey: privateKey.replace(/\\n/g, "\n") };
+
+  const privateKey = normalizePrivateKey(rawPrivateKey);
+  if (!privateKey.startsWith("-----BEGIN")) {
+    throw new Error(
+      `COINBASE_API_PRIVATE_KEY doesn't look like a PEM key (should start with "-----BEGIN"). ` +
+        `Got: "${privateKey.slice(0, 20)}..." — check for extra quoting or missing newlines.`
+    );
+  }
+
+  return { keyName, privateKey };
 }
 
 function buildJwt(method: string, path: string): string {
   const { keyName, privateKey } = getCredentials();
   const now = Math.floor(Date.now() / 1000);
 
-  return jwt.sign(
-    {
-      iss: "cdp",
-      sub: keyName,
-      nbf: now,
-      exp: now + 120,
-      uri: `${method} ${API_HOST}${path}`,
-    },
-    privateKey,
-    {
-      algorithm: "ES256",
-      header: {
-        alg: "ES256",
-        kid: keyName,
-        nonce: crypto.randomBytes(16).toString("hex"),
-      } as unknown as jwt.JwtHeader,
-    }
-  );
+  try {
+    return jwt.sign(
+      {
+        iss: "cdp",
+        sub: keyName,
+        nbf: now,
+        exp: now + 120,
+        uri: `${method} ${API_HOST}${path}`,
+      },
+      privateKey,
+      {
+        algorithm: "ES256",
+        header: {
+          alg: "ES256",
+          kid: keyName,
+          nonce: crypto.randomBytes(16).toString("hex"),
+        } as unknown as jwt.JwtHeader,
+      }
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Failed to sign a Coinbase request JWT — COINBASE_API_PRIVATE_KEY is likely malformed (${message})`
+    );
+  }
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
